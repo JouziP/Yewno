@@ -82,19 +82,6 @@ population = population.resample('Q').mean()
 ### finding the row number of the most recent date 
 ### there might be better ways ...
 ###############################################################################
-#t0_oil   = oil_prod_quarterly.index[0]
-#t0_gdp   = gdp_data.index[0]
-#t0_libor = libor3M.index[0]
-#t0_durb  = durable.index[0]
-#t0_pop   = population.index[0]
-#
-#tf_oil   = oil_prod_quarterly.index[-1]
-#tf_gdp   = gdp_data.index[-1]
-#tf_libor = libor3M.index[-1]
-#tf_pop   = durable.index[-1]
-#tf_durb  = population.index[-1]
-#
-
 
 
 t0_oil   = datetime.datetime.strptime(str(oil_prod_quarterly.index[0]), "%Y-%m-%d %H:%M:%S")
