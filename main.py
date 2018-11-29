@@ -1,171 +1,109 @@
-'''
-Source of data : https://fred.stlouisfed.org/
-Author : Pej
-'''
+
+
+
+
 
 import pandas as pd
 import datetime 
 import matplotlib.pyplot as plt
-
-### other packs 
-from  sklearn import linear_model
-
-
-### reading data and cleaning (less needed here though)
-###############################################################################
-##### Actual GDP
-###############################################################################
-gdp_data = pd.read_csv('./GDPC1.csv', index_col=0, parse_dates=[0])
-gdp_data.columns = ['Actual GDP']
-gdp_data = gdp_data.reset_index()
-gdp_data['DATE']= pd.to_datetime(gdp_data['DATE'])
-gdp_data = gdp_data.set_index('DATE')
-
-
-###############################################################################
-##### Oil Production (Finished_Motor_Gasoline)
-###############################################################################
-###### using the data on oil production from 1991 to 2018
-oil_production = pd.read_csv('./Weekly_US_Product_Supplied_of_Finished_Motor_Gasoline.csv',                              
-                             skiprows=[0,1,2, 3])
-oil_production.columns=['Date', 'Productions']
-oil_production.loc[:, 'Date'] = pd.to_datetime(oil_production['Date'])
-oil_production_cleaned = oil_production.set_index('Date')
-### resampling Quarterly
-oil_prod_quarterly = oil_production_cleaned.resample('Q').mean()
-
-
-###############################################################################
-##### 3-MONTH LIBOR  (some cleaning...)
-###############################################################################
-libor3M = pd.read_csv('./USD3MTD156N.csv')
-libor3M['DATE'] = pd.to_datetime(libor3M['DATE'])
-libor3M =libor3M.set_index('DATE')
-libor3M['USD3MTD156N'] = pd.to_numeric(libor3M['USD3MTD156N'].values[:], 
-       errors='coerce')
-null_col =  libor3M.columns[libor3M.isnull().any()] # obvious !
-num_nulls = len(libor3M[libor3M.isnull().any(axis=1)][null_col]) ## ne 0 
-libor3M = libor3M.dropna()  # num_nulls = 0
-
-### This is a three month libor but in case the daycount is different...
-libor3M = libor3M.resample('Q').mean()
+import numpy as np
+import numpy.linalg as lg
 
 
 
-###############################################################################
-##### DURABLE GOODS ORDERS
-###############################################################################
-durable = pd.read_csv('./DGORDER.csv')
-durable = durable.dropna(how='any')
-durable['DATE'] = pd.to_datetime(durable['DATE'])
-durable =durable.set_index('DATE')
-### resampling
-durable = durable.resample('Q').mean()
+closes  = pd.read_csv('./SnP_holdings_random_pick.csv', index_col=0 )
+closes_return = closes.pct_change().dropna()
+closes_return = closes_return.reset_index()
+closes_return['Date'] = pd.to_datetime(closes_return['Date'])
+closes_return = closes_return.set_index('Date')
 
-###############################################################################
-##### US Population
-###############################################################################
-population = pd.read_csv('./POPTHM.csv')
-population = population.dropna(how='any')
-population['DATE'] = pd.to_datetime(population['DATE'])
-population =population.set_index('DATE')
-#### resampling
-population = population.resample('Q').mean()
+#
+##### the strategy is based on a monthly allocation and 3M look-back covar
+lookBackDays=70
+alloc_period='M'
+quantile_ = 0.1
 
+num_assets = closes.shape[1]-1 ## -1 because one col is the spy (index)
+########### var of spy
+spy_vol_3M1M = closes_return['SPY'].rolling(lookBackDays).std().resample(alloc_period).mean().dropna()
+########### cov matrixes
+cov_mtx_time_series = closes_return.rolling(lookBackDays).cov().dropna()
+idx_start_date = np.where(closes_return.index == cov_mtx_time_series.index[0][0])[0][0]
+total_dates_in_series=(closes_return.shape[0] -idx_start_date)
 
+spy_index= np.where(cov_mtx_time_series[0:1].columns=='SPY')[0][0]
+betas = np.zeros([total_dates_in_series, num_assets])
+for i in range(total_dates_in_series):
+    cov = cov_mtx_time_series[(i*(num_assets+1)):((i+1)*(num_assets+1))]
+    betas[i, :] = list(cov.values[spy_index, :spy_index]) + list(cov.values[spy_index, (spy_index+1):])
 
-
-
-
-
-###############################################################################
-### finding the row number of the most recent date 
-### there might be better ways ...
-###############################################################################
-
-
-t0_oil   = datetime.datetime.strptime(str(oil_prod_quarterly.index[0]), "%Y-%m-%d %H:%M:%S")
-t0_gdp   = datetime.datetime.strptime(str(gdp_data.index[0]), "%Y-%m-%d %H:%M:%S")
-t0_libor = datetime.datetime.strptime(str(libor3M.index[0]), "%Y-%m-%d %H:%M:%S")
-t0_pop   = datetime.datetime.strptime(str(population.index[0]), "%Y-%m-%d %H:%M:%S")
-t0_durb  = datetime.datetime.strptime(str(durable.index[0]), "%Y-%m-%d %H:%M:%S")
+cols=list(cov.columns[:spy_index])+list(cov.columns[(spy_index+1):])
+betas = pd.DataFrame(betas, 
+                     index = closes_return.index[idx_start_date:],
+                     columns=cols)
+betas = betas.resample(alloc_period).mean()
+for r in range(betas.shape[0]):
+    betas.iloc[r]= betas.iloc[r].apply(lambda x: x/spy_vol_3M1M.iloc[r])
 
 
-tf_oil   = datetime.datetime.strptime(str(oil_prod_quarterly.index[-1]), "%Y-%m-%d %H:%M:%S")
-tf_gdp   = datetime.datetime.strptime(str(gdp_data.index[-1]), "%Y-%m-%d %H:%M:%S")
-tf_libor = datetime.datetime.strptime(str(libor3M.index[-1]), "%Y-%m-%d %H:%M:%S")
-tf_pop   = datetime.datetime.strptime(str(population.index[-1]), "%Y-%m-%d %H:%M:%S")
-tf_durb  = datetime.datetime.strptime(str(durable.index[-1]), "%Y-%m-%d %H:%M:%S")
+########## assignment of weghts
+########## in each allocation period the assets with a beta higher than cutoff 
+########## of that period receives a w=1 and otherwise w=0
 
-start_date =  max([t0_oil, t0_gdp, t0_libor, t0_pop, t0_durb ])
-end_date   =  min([tf_oil, tf_gdp, tf_libor, tf_pop, tf_durb ])
+weights = np.zeros(betas.shape, dtype=int)
+for r in range(betas.shape[0]):
+    cutoff  = betas.iloc[r].quantile(quantile_)
+    weights[r, :]  = betas.iloc[r].apply(lambda x: (0,1)[x>cutoff])
 
-##### filter and adjust the date
-libor3M = libor3M.loc[start_date:end_date] #.reset_index()['DATE'].apply(lambda x: x + datetime.timedelta(days=1))
-libor3M = libor3M.reset_index() 
-libor3M['DATE'] = libor3M['DATE'].apply(lambda x: x + datetime.timedelta(days=1))
-libor3M = libor3M.set_index('DATE')
-
-oil_prod_quarterly = oil_prod_quarterly.loc[start_date:end_date] #.reset_index()['DATE'].apply(lambda x: x + datetime.timedelta(days=1))
-oil_prod_quarterly = oil_prod_quarterly.reset_index() 
-oil_prod_quarterly['Date'] = oil_prod_quarterly['Date'].apply(lambda x: x + datetime.timedelta(days=1))
-oil_prod_quarterly = oil_prod_quarterly.set_index('Date')
+weights_df = pd.DataFrame(weights, index= betas.index, columns=cols)
 
 
-population = population.loc[start_date:end_date] #.reset_index()['DATE'].apply(lambda x: x + datetime.timedelta(days=1))
-population = population.reset_index() 
-population['DATE'] = population['DATE'].apply(lambda x: x + datetime.timedelta(days=1))
-population = population.set_index('DATE')
+########## application to the returns 
+### lets exclude the SPY from returns 
+portfolio_return = np.zeros([betas.shape[0]-1, 1])
+closes_return_assets = closes_return.drop(['SPY'], axis=1)
+for alloc_idx in range(len(betas.index)-1):
+    start_date = betas.index[alloc_idx]
+    end_date   = betas.index[alloc_idx+1]
+    period_returns =closes_return_assets.loc[start_date:end_date]
+    total_per_date_in_period_return = period_returns.mul(weights[alloc_idx, :], ).sum(axis=1)
+    # full return in alloc_period
+    portfolio_return[alloc_idx,0]=(total_per_date_in_period_return + 1.0).prod() - 1 
+    
+col_name = 'portfolio %s '%(alloc_period) + 'Return %'
+portfolio_return=pd.DataFrame(portfolio_return, index=betas.index[1:], columns=[col_name ])
+
+portfolio_return.plot(style='--o')
+    
+print '========================================================='
+print 'alloc_period : ', alloc_period
+print 'hist data used from %d days prior : '%lookBackDays
+print 'allocation to quantiles > %f : '%quantile_
+print 'Total return over the horizon of the strategy %:', portfolio_return.sum()[0]
+print '========================================================= \n\n'
+
+#################################  The index return over same period:
+
+market_index = closes_return['SPY']
+return_per_period_idx=np.zeros([betas.shape[0]-1, 1])
+for alloc_idx in range(len(betas.index)-1):
+    start_date = betas.index[alloc_idx]
+    end_date   = betas.index[alloc_idx+1]
+    period_returns_idx = market_index.loc[start_date:end_date]
+    return_per_period_idx[alloc_idx, 0] = (period_returns_idx+1).prod()-1
 
 
-durable = durable.loc[start_date:end_date] #.reset_index()['DATE'].apply(lambda x: x + datetime.timedelta(days=1))
-durable = durable.reset_index() 
-durable['DATE'] = durable['DATE'].apply(lambda x: x + datetime.timedelta(days=1))
-durable = durable.set_index('DATE')
+col_name = 'SPY %s '%(alloc_period) + 'Return %'
+return_per_period_idx=  pd.DataFrame(return_per_period_idx, index=betas.index[1:], columns=[col_name ])
 
-final_dt = pd.concat([oil_prod_quarterly, 
-                      libor3M, 
-                      population, 
-                      durable, 
-                      gdp_data], axis=1).dropna()
-final_dt.columns=['oil',
-                  'libor',
-                  'population',
-                  'durable',
-                  'GDP',
-                  ]
-## normalize for illustration 
-final_dt_norm = (final_dt - final_dt.mean())/(final_dt.max() - final_dt.min())
+return_per_period_idx.plot(style='--o')
+
+    
+print '========================================================='   
+print 'alloc_period : ', alloc_period
+#print 'hist data used from %d days prior : '%lookBackDays
+print 'Total return of SPY %:', return_per_period_idx.sum()[0]
+print '========================================================='
+    
 
 
-#### visualization:
-#fig, ax = plt.subplots(figsize=[10,10])
-#for col in range(final_dt_norm.shape[1]):
-#    ax.plot(final_dt_norm.values[:, col], label=str(final_dt_norm.keys()[col]))
-
-
-### seems like libor is not a good fit unless we consider some non-linear relation
-### between Libor and GDP ... so let's drop it for now.
-fig, ax = plt.subplots(figsize=[10,10])
-for col in range(final_dt_norm.shape[1]):
-    if final_dt_norm.columns[col]!= 'libor':
-        ax.plot(final_dt_norm.values[:, col], label=str(final_dt_norm.columns[col]))
-ax.set_xlabel('quarters since 1992', **{'fontsize':18})
-plt.legend()
-
-
-###### let's not see if the production of oil is actually in correlation
-###### with the gdp or not. 
-###### From the plot they are not perfactly in shape ... but anyway... 
-
-y_data = final_dt.iloc[:, -1]       ##  gdp the target
-
-for i in range(4):  ### since we have chosen four indicators
-    X_data = final_dt.iloc[:, [i]] ##  the indexs we chose
-    ##
-    lin_mod = linear_model.LinearRegression()   
-    _ = lin_mod.fit(X_data, y_data)
-    print ' ==========================   ======================== '
-    print 'The indecator chosen is : %s ' %(final_dt.columns[i])
-    print('R-Squared of Linear Regression Model:', lin_mod.score(X_data, y_data))
-    print ' ==========================   ======================== \n\n'
